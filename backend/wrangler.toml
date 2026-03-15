@@ -1,0 +1,23 @@
+name = "claude-session-sync"
+main = "src/index.ts"
+compatibility_date = "2024-01-01"
+
+# KV Namespace for machine registry and metadata
+[[kv_namespaces]]
+binding = "MACHINES"
+id = "MACHINES_KV_ID"  # Replace with actual KV namespace ID
+
+# R2 Bucket for encrypted session data
+[[r2_buckets]]
+binding = "SESSION_DATA"
+bucket_name = "claude-session-sync"
+
+# Environment variables (set via wrangler secret)
+# API_KEY_SALT - for hashing API keys
+# MASTER_KEY - for additional server-side operations
+
+[vars]
+ENVIRONMENT = "production"
+MAX_MACHINES_PER_USER = "10"
+MAX_STORAGE_BYTES_FREE = "104857600"  # 100MB
+MAX_STORAGE_BYTES_PRO = "5368709120"  # 5GB

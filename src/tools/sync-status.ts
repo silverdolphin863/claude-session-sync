@@ -25,9 +25,7 @@ export async function syncStatus(): Promise<string> {
   if (!(await isConfigured())) {
     return `Sync not configured yet.
 
-To set up sync:
-1. Get an API key from https://claude-sync.regios.org
-2. Run: claude mcp configure claude-session-sync --api-key YOUR_KEY`;
+Run sync_setup first to initialize with a recovery phrase.`;
   }
 
   try {
