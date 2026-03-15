@@ -144,15 +144,23 @@ export async function writePlans(plans: Record<string, string>): Promise<void> {
   }
 }
 
-// Read project data
-export async function readProjects(): Promise<Record<string, ProjectEntry[]>> {
+// Read project data (optionally filtered to specific projects)
+export async function readProjects(projectNames?: string[]): Promise<Record<string, string>> {
   const projectsDir = path.join(getClaudeDir(), 'projects');
-  const projects: Record<string, ProjectEntry[]> = {};
+  const projects: Record<string, string> = {};  // Store raw content, not parsed
 
   try {
     const projectFolders = await fs.readdir(projectsDir);
 
     for (const folder of projectFolders) {
+      // Filter to specific projects if specified
+      if (projectNames && projectNames.length > 0) {
+        const matchesFilter = projectNames.some(name =>
+          folder.toLowerCase().includes(name.toLowerCase())
+        );
+        if (!matchesFilter) continue;
+      }
+
       const folderPath = path.join(projectsDir, folder);
       const stat = await fs.stat(folderPath);
 
@@ -163,18 +171,9 @@ export async function readProjects(): Promise<Record<string, ProjectEntry[]>> {
           if (file.endsWith('.jsonl')) {
             const filePath = path.join(folderPath, file);
             const content = await fs.readFile(filePath, 'utf-8');
-            const lines = content.trim().split('\n').filter(Boolean);
-
-            const entries = lines.map((line) => {
-              try {
-                return JSON.parse(line) as ProjectEntry;
-              } catch {
-                return null;
-              }
-            }).filter((e): e is ProjectEntry => e !== null);
-
+            // Store raw content to preserve everything
             const projectKey = `${folder}/${file}`;
-            projects[projectKey] = entries;
+            projects[projectKey] = content;
           }
         }
       }
@@ -186,6 +185,20 @@ export async function readProjects(): Promise<Record<string, ProjectEntry[]>> {
   }
 
   return projects;
+}
+
+// Write project data
+export async function writeProjects(projects: Record<string, string>): Promise<void> {
+  const projectsDir = path.join(getClaudeDir(), 'projects');
+
+  for (const [projectKey, content] of Object.entries(projects)) {
+    const [folder, file] = projectKey.split('/');
+    const folderPath = path.join(projectsDir, folder);
+    await fs.mkdir(folderPath, { recursive: true });
+
+    const filePath = path.join(folderPath, file);
+    await fs.writeFile(filePath, content, 'utf-8');
+  }
 }
 
 // Read settings
@@ -314,4 +327,96 @@ export function getMachineInfo(): { hostname: string; platform: string } {
     hostname: os.hostname(),
     platform: process.platform,
   };
+}
+
+/**
+ * Extract human-readable project name from folder path
+ * e.g., "C--Projects-StarWhisper" → "StarWhisper"
+ */
+export function getProjectDisplayName(folderName: string): string {
+  // Handle Windows-style encoded paths: C--Projects-StarWhisper
+  const parts = folderName.split('-').filter(Boolean);
+
+  // Take the last meaningful part as the project name
+  // Skip drive letters and "Projects" prefix
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const part = parts[i];
+    // Skip common prefixes
+    if (part.length === 1) continue; // Drive letter (C, D, etc.)
+    if (part.toLowerCase() === 'projects') continue;
+    if (part.toLowerCase() === 'users') continue;
+    if (part.toLowerCase() === 'home') continue;
+    return part;
+  }
+
+  return folderName; // Fallback to full name
+}
+
+/**
+ * List available projects with human-readable names and sizes
+ */
+export async function listAvailableProjects(): Promise<Array<{
+  folderName: string;
+  displayName: string;
+  sizeBytes: number;
+  sessionCount: number;
+}>> {
+  const projectsDir = path.join(getClaudeDir(), 'projects');
+  const results: Array<{
+    folderName: string;
+    displayName: string;
+    sizeBytes: number;
+    sessionCount: number;
+  }> = [];
+
+  try {
+    const entries = await fs.readdir(projectsDir, { withFileTypes: true });
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+
+      const folderPath = path.join(projectsDir, entry.name);
+      let sizeBytes = 0;
+      let sessionCount = 0;
+
+      try {
+        const files = await fs.readdir(folderPath);
+        for (const file of files) {
+          if (file.endsWith('.jsonl')) {
+            sessionCount++;
+            const stat = await fs.stat(path.join(folderPath, file));
+            sizeBytes += stat.size;
+          }
+        }
+      } catch {
+        // Skip if can't read
+      }
+
+      results.push({
+        folderName: entry.name,
+        displayName: getProjectDisplayName(entry.name),
+        sizeBytes,
+        sessionCount,
+      });
+    }
+
+    // Sort by size descending
+    results.sort((a, b) => b.sizeBytes - a.sizeBytes);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw error;
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Format bytes to human-readable string
+ */
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }

@@ -30,7 +30,7 @@ export interface SessionData {
   history: HistoryEntry[];
   todos: Record<string, TodoItem[]>;  // sessionId -> todos
   plans: Record<string, string>;       // planName -> content
-  projects: Record<string, ProjectEntry[]>;  // projectPath -> entries
+  projects: Record<string, string>;    // projectPath -> raw JSONL content
   settings: ClaudeSettings;
 }
 
@@ -72,6 +72,7 @@ export interface EncryptedBlob {
   version: 1 | 2;     // v1 = random key, v2 = passphrase-derived
   nonce: string;      // base64
   ciphertext: string; // base64
+  compressed?: boolean;
 }
 
 // Sync request/response types
@@ -103,6 +104,39 @@ export interface ConflictInfo {
 }
 
 export type MergeStrategy = 'overwrite' | 'merge' | 'ask';
+
+// Chunked sync types
+export type ChunkType = 'history' | 'todos' | 'plans' | 'project' | 'settings';
+
+export interface SyncChunk {
+  chunkType: ChunkType;
+  chunkId: string;           // Unique ID (e.g., "history", "todos", "project:/path/to/project")
+  timestamp: number;
+  data: EncryptedBlob;       // Each chunk is encrypted separately
+  sizeBytes: number;
+}
+
+export interface ServerCapabilities {
+  chunkedSync: boolean;
+  maxChunkSizeBytes: number;
+}
+
+export interface ChunkedPushRequest {
+  machineId: string;
+  chunks: SyncChunk[];
+  checksum?: string;
+}
+
+export interface ChunkedPushResponse {
+  success: boolean;
+  chunksStored: number;
+  totalSizeBytes: number;
+}
+
+export interface ChunkedPullResponse {
+  chunks: SyncChunk[];
+  serverTimestamp: number;
+}
 
 // Tool parameter types
 export interface SyncPushParams {

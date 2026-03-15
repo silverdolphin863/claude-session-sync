@@ -21,10 +21,11 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 
 import { syncSetup, type SyncSetupParams } from './tools/sync-setup.js';
-import { syncPush } from './tools/sync-push.js';
+import { syncPush, type SyncPushParamsExtended } from './tools/sync-push.js';
 import { syncPull, type SyncPullParamsExtended } from './tools/sync-pull.js';
 import { syncStatus } from './tools/sync-status.js';
 import { syncListMachines } from './tools/sync-list.js';
+import { syncListProjects } from './tools/sync-list-projects.js';
 import type { SyncPushParams } from './types.js';
 
 // Server instance
@@ -66,17 +67,14 @@ const TOOLS = [
   },
   {
     name: 'sync_push',
-    description: 'Push current Claude session to the sync server. Encrypts data locally before upload.',
+    description: 'Push Claude session to the sync server. Encrypts data locally before upload. Can include full project conversation context.',
     inputSchema: {
       type: 'object' as const,
       properties: {
-        sessionId: {
-          type: 'string',
-          description: 'Optional session ID to push. Defaults to current session.',
-        },
-        project: {
-          type: 'string',
-          description: 'Optional project path to sync only that project.',
+        projects: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Project names to include with full conversation context (e.g., ["StarWhisper", "Lunoo"]). Without this, only history/todos/plans are synced.',
         },
       },
       required: [],
@@ -128,6 +126,15 @@ const TOOLS = [
       required: [],
     },
   },
+  {
+    name: 'sync_list_projects',
+    description: 'List local projects with human-readable names and sizes. Shows what can be synced.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {},
+      required: [],
+    },
+  },
 ];
 
 // List tools handler
@@ -154,9 +161,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'sync_push': {
-        const params: SyncPushParams = {
-          sessionId: args?.sessionId as string | undefined,
-          project: args?.project as string | undefined,
+        const params: SyncPushParamsExtended = {
+          projects: args?.projects as string[] | undefined,
         };
         const result = await syncPush(params);
         return {
@@ -186,6 +192,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'sync_list_machines': {
         const result = await syncListMachines();
+        return {
+          content: [{ type: 'text', text: result }],
+        };
+      }
+
+      case 'sync_list_projects': {
+        const result = await syncListProjects();
         return {
           content: [{ type: 'text', text: result }],
         };

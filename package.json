@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "MCP server for syncing Claude Code sessions between machines",
   "main": "dist/index.js",
+  "bin": { "claude-session-sync": "dist/index.js" },
   "type": "module",
   "scripts": {
     "build": "tsc",
@@ -19,8 +20,12 @@
     "session",
     "anthropic"
   ],
-  "author": "Regios",
+  "author": "Michael Weber",
   "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/silverdolphin863/claude-session-sync" },
+  "homepage": "https://github.com/silverdolphin863/claude-session-sync#readme",
+  "bugs": { "url": "https://github.com/silverdolphin863/claude-session-sync/issues" },
+  "files": ["dist", "README.md", "LICENSE"],
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
     "bip39": "^3.1.0",

@@ -18,7 +18,12 @@ import * as bip39 from 'bip39';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
+import * as zlib from 'zlib';
+import { promisify } from 'util';
 import type { EncryptedBlob } from '../types.js';
+
+const gzip = promisify(zlib.gzip);
+const gunzip = promisify(zlib.gunzip);
 
 // Storage paths
 const PHRASE_PATH = path.join(os.homedir(), '.claude', 'sync-phrase.enc');
@@ -243,19 +248,97 @@ export async function decrypt(blob: EncryptedBlob): Promise<string> {
 }
 
 /**
- * Encrypt session data object
+ * Encrypt session data object (with compression)
+ * Uses Buffer-based approach to handle large data
  */
 export async function encryptSessionData(data: object): Promise<EncryptedBlob> {
-  const json = JSON.stringify(data);
-  return encrypt(json);
+  // Build JSON using buffers to handle large data
+  const buffers: Buffer[] = [];
+  const dataRecord = data as Record<string, unknown>;
+
+  buffers.push(Buffer.from('{'));
+  const keys = Object.keys(dataRecord);
+
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i];
+    const value = dataRecord[key];
+
+    // For 'projects' field, serialize each project separately
+    if (key === 'projects' && typeof value === 'object' && value !== null) {
+      buffers.push(Buffer.from(`"${key}":{`));
+      const projectEntries = Object.entries(value as Record<string, string>);
+      for (let j = 0; j < projectEntries.length; j++) {
+        const [projKey, projValue] = projectEntries[j];
+        // Project values are already strings, just escape them
+        const escapedValue = JSON.stringify(projValue);
+        buffers.push(Buffer.from(`${JSON.stringify(projKey)}:${escapedValue}`));
+        if (j < projectEntries.length - 1) buffers.push(Buffer.from(','));
+      }
+      buffers.push(Buffer.from('}'));
+    } else {
+      // Regular JSON stringify for smaller fields
+      buffers.push(Buffer.from(`"${key}":${JSON.stringify(value)}`));
+    }
+
+    if (i < keys.length - 1) buffers.push(Buffer.from(','));
+  }
+
+  buffers.push(Buffer.from('}'));
+
+  // Concatenate all buffers
+  const jsonBuffer = Buffer.concat(buffers);
+
+  // Compress before encrypting (text typically compresses 5-10x)
+  const compressed = await gzip(jsonBuffer, { level: 9 });
+  console.error(`Compressed to ${(compressed.length / 1024 / 1024).toFixed(1)} MB`);
+
+  // Encrypt the compressed bytes directly (not base64 encoded)
+  const key = await getEncryptionKey();
+  const nonce = nacl.randomBytes(nacl.secretbox.nonceLength);
+
+  // TweetNaCl expects Uint8Array
+  const messageBytes = new Uint8Array(compressed);
+  const ciphertext = nacl.secretbox(messageBytes, nonce, key);
+  console.error(`Encrypted to ${(ciphertext.length / 1024 / 1024).toFixed(1)} MB`);
+
+  // Use Node's Buffer for base64 encoding (handles large data better)
+  const ciphertextBase64 = Buffer.from(ciphertext).toString('base64');
+  console.error(`Base64 encoded to ${(ciphertextBase64.length / 1024 / 1024).toFixed(1)} MB`);
+
+  return {
+    version: 2,
+    nonce: encodeBase64(nonce),
+    ciphertext: ciphertextBase64,
+    compressed: true,  // Flag to indicate compression
+  } as EncryptedBlob;
 }
 
 /**
- * Decrypt session data object
+ * Decrypt session data object (with decompression)
  */
 export async function decryptSessionData<T>(blob: EncryptedBlob): Promise<T> {
-  const json = await decrypt(blob);
-  return JSON.parse(json) as T;
+  const key = await getEncryptionKey();
+  const nonce = decodeBase64(blob.nonce);
+
+  // Use Node's Buffer for base64 decoding (handles large data better)
+  const ciphertext = new Uint8Array(Buffer.from(blob.ciphertext, 'base64'));
+
+  const decrypted = nacl.secretbox.open(ciphertext, nonce, key);
+  if (!decrypted) {
+    throw new Error('Decryption failed - wrong recovery phrase or corrupted data');
+  }
+
+  // Check if data is compressed (v2 with compressed flag, or detect gzip magic bytes)
+  const isCompressed = (blob as { compressed?: boolean }).compressed ||
+    (decrypted[0] === 0x1f && decrypted[1] === 0x8b);
+
+  if (isCompressed) {
+    const decompressed = await gunzip(Buffer.from(decrypted));
+    return JSON.parse(decompressed.toString('utf-8')) as T;
+  } else {
+    // Legacy uncompressed data
+    return JSON.parse(encodeUTF8(decrypted)) as T;
+  }
 }
 
 /**

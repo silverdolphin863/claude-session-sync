@@ -6,21 +6,24 @@
  * Data is decrypted client-side after download.
  */
 
-import type { SyncPullParams, SessionData, MergeStrategy } from '../types.js';
+import type { SyncPullParams, SessionData, MergeStrategy, SyncChunk } from '../types.js';
 import {
   readAllSessionData,
   appendHistory,
   writeTodos,
   writePlans,
+  writeProjects,
   claudeDirExists,
 } from '../lib/claude-data.js';
 import { decryptSessionData } from '../lib/encryption.js';
 import {
   pullData,
+  pullDataChunked,
   isConfigured,
   listMachines,
   listProjects,
   getCurrentMachineId,
+  getServerCapabilities,
 } from '../lib/api-client.js';
 
 export interface SyncPullParamsExtended extends SyncPullParams {
@@ -55,25 +58,47 @@ Run sync_setup first to initialize with a recovery phrase.`;
   const { machineId, mergeStrategy = 'merge', project, targetProject } = params;
 
   try {
+    // Check server capabilities
+    const capabilities = await getServerCapabilities();
+    console.error(`Server capabilities: chunkedSync=${capabilities.chunkedSync}`);
+
     // Get machine name for display
     const machines = await listMachines();
     const sourceMachine = machines.find(m => m.id === machineId);
     const sourceName = sourceMachine?.name || machineId;
 
-    // Pull encrypted data
-    const response = await pullData(machineId);
-
-    // Decrypt
-    const remoteData = await decryptSessionData<SessionData>(response.data);
-
-    // Filter by project if specified
-    let filteredRemoteData = remoteData;
-    if (project) {
-      filteredRemoteData = filterByProject(remoteData, project);
-    }
-
     // Read local data for comparison
     const localData = await readAllSessionData();
+
+    let remoteData: SessionData;
+    let timestamp: string;
+    let useChunked = false;
+
+    // Use chunked sync if supported
+    if (capabilities.chunkedSync) {
+      useChunked = true;
+      console.error('Using chunked pull...');
+
+      const response = await pullDataChunked(machineId, {
+        chunkIds: project ? [`project:${project}`] : undefined,
+      });
+
+      // Reassemble data from chunks
+      remoteData = await reassembleFromChunks(response.chunks);
+      timestamp = new Date(response.serverTimestamp).toLocaleString();
+    } else {
+      // Fall back to legacy pull
+      console.error('Using legacy pull...');
+      const response = await pullData(machineId);
+      remoteData = await decryptSessionData<SessionData>(response.data);
+      timestamp = new Date(response.timestamp).toLocaleString();
+    }
+
+    // Filter by project if specified (for legacy mode or if we pulled everything)
+    let filteredRemoteData = remoteData;
+    if (project && !useChunked) {
+      filteredRemoteData = filterByProject(remoteData, project);
+    }
 
     // Apply merge strategy
     const result = await applyMerge(
@@ -83,10 +108,14 @@ Run sync_setup first to initialize with a recovery phrase.`;
       targetProject || project
     );
 
-    const timestamp = new Date(response.timestamp).toLocaleString();
-    const projectInfo = project ? ` (project: ${project})` : ' (full sync)';
+    const projectInfo = project ? ` (project: ${project})` : '';
+    const syncMode = useChunked ? ' (chunked sync)' : '';
 
-    return `Successfully pulled session data from ${sourceName}${projectInfo}
+    const projectsLine = result.projectsMerged > 0
+      ? `\n- Projects synced: ${result.projectsMerged}`
+      : '';
+
+    return `Successfully pulled session data from ${sourceName}${projectInfo}${syncMode}
 
 Last updated: ${timestamp}
 Merge strategy: ${mergeStrategy}
@@ -94,13 +123,64 @@ Merge strategy: ${mergeStrategy}
 Changes applied:
 - History entries added: ${result.historyAdded}
 - Todos merged: ${result.todosMerged}
-- Plans merged: ${result.plansMerged}
+- Plans merged: ${result.plansMerged}${projectsLine}
 
-${result.conflicts.length > 0 ? `\nConflicts detected:\n${result.conflicts.join('\n')}` : 'No conflicts.'}`;
+${result.conflicts.length > 0 ? `Conflicts detected:\n${result.conflicts.join('\n')}` : 'No conflicts.'}`;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return `Pull failed: ${message}`;
   }
+}
+
+/**
+ * Reassemble SessionData from encrypted chunks
+ */
+async function reassembleFromChunks(chunks: SyncChunk[]): Promise<SessionData> {
+  const data: SessionData = {
+    history: [],
+    todos: {},
+    plans: {},
+    projects: {},
+    settings: {},
+  };
+
+  for (const chunk of chunks) {
+    console.error(`  Decrypting chunk: ${chunk.chunkId}...`);
+
+    const decrypted = await decryptSessionData<{
+      history?: SessionData['history'];
+      todos?: SessionData['todos'];
+      plans?: SessionData['plans'];
+      project?: string;
+    }>(chunk.data);
+
+    switch (chunk.chunkType) {
+      case 'history':
+        if (decrypted.history) {
+          data.history = decrypted.history;
+        }
+        break;
+      case 'todos':
+        if (decrypted.todos) {
+          data.todos = decrypted.todos;
+        }
+        break;
+      case 'plans':
+        if (decrypted.plans) {
+          data.plans = decrypted.plans;
+        }
+        break;
+      case 'project':
+        if (decrypted.project) {
+          // Extract project path from chunkId (e.g., "project:/path/to/project")
+          const projectPath = chunk.chunkId.replace('project:', '');
+          data.projects[projectPath] = decrypted.project;
+        }
+        break;
+    }
+  }
+
+  return data;
 }
 
 /**
@@ -246,6 +326,7 @@ interface MergeResult {
   historyAdded: number;
   todosMerged: number;
   plansMerged: number;
+  projectsMerged: number;
   conflicts: string[];
 }
 
@@ -259,6 +340,7 @@ async function applyMerge(
     historyAdded: 0,
     todosMerged: 0,
     plansMerged: 0,
+    projectsMerged: 0,
     conflicts: [],
   };
 
@@ -311,6 +393,26 @@ async function applyMerge(
     for (const planName of Object.keys(remote.plans)) {
       if (local.plans[planName] && local.plans[planName] !== remote.plans[planName]) {
         result.conflicts.push(`- Plan conflict: ${planName}`);
+      }
+    }
+  }
+
+  // Merge projects (full conversation context)
+  if (Object.keys(remote.projects).length > 0) {
+    if (strategy === 'overwrite') {
+      await writeProjects(remote.projects);
+      result.projectsMerged = Object.keys(remote.projects).length;
+    } else if (strategy === 'merge') {
+      // For projects, remote always wins (we want the full context)
+      const mergedProjects = { ...local.projects, ...remote.projects };
+      await writeProjects(mergedProjects);
+      result.projectsMerged = Object.keys(remote.projects).length;
+    } else {
+      // 'ask' - report which projects would be synced
+      for (const projectKey of Object.keys(remote.projects)) {
+        if (local.projects[projectKey]) {
+          result.conflicts.push(`- Project would be updated: ${projectKey}`);
+        }
       }
     }
   }
