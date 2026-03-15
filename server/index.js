@@ -84,6 +84,11 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: Date.now() });
 });
 
+// Server capabilities (tells client to use legacy mode)
+app.get('/sync/capabilities', authenticate, (req, res) => {
+  res.json({ chunkedSync: false, maxChunkSizeBytes: 0 });
+});
+
 // Register machine
 app.post('/machines/register', authenticate, (req, res) => {
   try {
