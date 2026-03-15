@@ -24,7 +24,7 @@ import type {
 const CONFIG_PATH = path.join(os.homedir(), '.claude', 'sync-config.json');
 
 // Default backend URL
-const DEFAULT_API_URL = 'https://claude-session-sync.workers.dev';
+const DEFAULT_API_URL = 'http://claude-sync.130.162.144.114.nip.io';
 
 interface SyncConfig {
   apiUrl: string;
